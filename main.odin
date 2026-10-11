@@ -10,7 +10,7 @@ import rl "vendor:raylib"
 Rect :: rl.Rectangle
 
 Type :: enum {
-    Damerau_Levenshtein_With_Trigram_And_Q_Gram,
+    Damerau_Levenshtein_With_Trigram_And_Trigram_Filter,
     Damerau_Levenshtein_With_Trigram,
     Damerau_Levenshtein_No_Trigram,
     Linear,
@@ -54,7 +54,7 @@ get_gui :: #force_inline proc() -> ^Gui { return &g_gui }
 main :: proc() {
     gui := init_gui()
     state := get_state()
-    state.search_type = .Damerau_Levenshtein_With_Trigram_And_Q_Gram
+    state.search_type = .Damerau_Levenshtein_With_Trigram_And_Trigram_Filter
 
     build_dataset()
 
@@ -73,12 +73,12 @@ main :: proc() {
 
         // #draw
         {
-            if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Q_Gram {
-                rl.DrawText("Damerau Levenshtein with trigram and q gram", 15, 10, 20, rl.WHITE)
+            if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Trigram_Filter {
+                rl.DrawText("Damerau Levenshtein with trigram (and trigram filter)", 15, 10, 20, rl.WHITE)
             }
 
             if state.search_type == .Damerau_Levenshtein_With_Trigram {
-                rl.DrawText("Damerau Levenshtein with trigram (no q gram)", 15, 10, 20, rl.WHITE)
+                rl.DrawText("Damerau Levenshtein with trigram (no trigram filter)", 15, 10, 20, rl.WHITE)
             }
 
             if state.search_type == .Linear {
@@ -132,7 +132,7 @@ update :: proc() {
 
         // damerau levenshtein
         if string(input_as_cstring) == "/v1" {
-            state.search_type = .Damerau_Levenshtein_With_Trigram_And_Q_Gram
+            state.search_type = .Damerau_Levenshtein_With_Trigram_And_Trigram_Filter
             clear(&state.search_term)
             clear(&state.search_results_v2)
         } else if string(input_as_cstring) == "/v2" {
@@ -156,7 +156,7 @@ update :: proc() {
     }
 
     if state.do_search {
-        if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Q_Gram {
+        if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Trigram_Filter {
             start := time.tick_now()
             trigram_search(true)
             elapsed := time.tick_since(start)
@@ -218,7 +218,7 @@ similarity :: proc(s1: string, s2: string) -> f64 {
     return rune_level_distance
 }
 
-trigram_search :: proc(use_q_gram: bool = true) {
+trigram_search :: proc(filter_trigram: bool = true) {
     state := get_state()
 
     tmp_results_map : map[string]i32
@@ -241,7 +241,8 @@ trigram_search :: proc(use_q_gram: bool = true) {
 
     clear(&state.search_results_v2)
 
-    if use_q_gram {
+    // @todo: read about Ukkonen/Gravano q-gram count filter
+    if filter_trigram {
         min_trigram_count := i32(f64(len(input_lower)) * 0.50)
         fmt.println("=========> MIN: ", min_trigram_count)
 
