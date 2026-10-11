@@ -1,13 +1,20 @@
 package main
 
 import "core:fmt"
+import "core:time"
 import "core:os"
 import "core:sort"
 import "core:strings"
-import "core:unicode/utf8"
 import rl "vendor:raylib"
 
 Rect :: rl.Rectangle
+
+Type :: enum {
+    Damerau_Levenshtein_With_Trigram_And_Q_Gram,
+    Damerau_Levenshtein_With_Trigram,
+    Damerau_Levenshtein_No_Trigram,
+    Linear,
+}
 
 App_State :: struct {
     frame_count: int,
@@ -15,11 +22,12 @@ App_State :: struct {
     trigram_index: map[string][dynamic]i32,
 
     search_term: [dynamic]rune,
-    search_results: [dynamic]cstring,
     search_results_v2: [dynamic]Row,
 
     last_input_at: int, // frame count
-    do_search: bool
+    do_search: bool,
+
+    search_type: Type
 
 }
 
@@ -46,6 +54,7 @@ get_gui :: #force_inline proc() -> ^Gui { return &g_gui }
 main :: proc() {
     gui := init_gui()
     state := get_state()
+    state.search_type = .Damerau_Levenshtein_With_Trigram_And_Q_Gram
 
     build_dataset()
 
@@ -64,6 +73,18 @@ main :: proc() {
 
         // #draw
         {
+            if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Q_Gram {
+                rl.DrawText("Damerau Levenshtein with trigram and q gram", 15, 10, 20, rl.WHITE)
+            }
+
+            if state.search_type == .Damerau_Levenshtein_With_Trigram {
+                rl.DrawText("Damerau Levenshtein with trigram (no q gram)", 15, 10, 20, rl.WHITE)
+            }
+
+            if state.search_type == .Linear {
+                rl.DrawText("Simple linear search", 15, 10, 20, rl.WHITE)
+            }
+
             c_frame_count := fmt.ctprintf("%i", state.frame_count)
             rl.DrawText(c_frame_count, 1000, 15, 20, rl.ORANGE)
 
@@ -71,10 +92,10 @@ main :: proc() {
             rl.DrawText(c_results_count, 600, 15, 20, rl.WHITE)
 
             rl.DrawRectangleRec(gui.input_rect, rl.WHITE)
-            rl.DrawText(get_search_input(), 15, 15, 20, TEXT_COLOR)
+            rl.DrawText(get_search_input(), 15, 40, 20, TEXT_COLOR)
 
             screen_height := rl.GetScreenHeight()
-            pos_y : i32 = 50
+            pos_y : i32 = 70
             for row, i in state.search_results_v2 {
                 txt := fmt.ctprintf("%s: %f", row.name, row.score)
 
@@ -82,9 +103,7 @@ main :: proc() {
                 pos_y += 20
 
                 if pos_y >= screen_height do break
-
             }
-
         }
 
         rl.EndDrawing()
@@ -93,6 +112,8 @@ main :: proc() {
     }
 
     delete(state.data)
+    delete(state.trigram_index)
+    delete(state.search_results_v2)
 }
 
 @(private = "file")
@@ -106,29 +127,57 @@ update :: proc() {
         }
     }
 
+    if rl.IsKeyPressed(rl.KeyboardKey.ENTER) {
+        input_as_cstring := get_search_input()
+
+        // damerau levenshtein
+        if string(input_as_cstring) == "/v1" {
+            state.search_type = .Damerau_Levenshtein_With_Trigram_And_Q_Gram
+            clear(&state.search_term)
+            clear(&state.search_results_v2)
+        } else if string(input_as_cstring) == "/v2" {
+            state.search_type = .Damerau_Levenshtein_With_Trigram
+            clear(&state.search_term)
+            clear(&state.search_results_v2)
+        } else if string(input_as_cstring) == "/v3" {
+            state.search_type = .Linear
+            clear(&state.search_term)
+            clear(&state.search_results_v2)
+        } else {
+            state.do_search = true
+        }
+
+
+    }
+
     input := rl.GetCharPressed()
     if input > 0 {
-        state.last_input_at = state.frame_count
-        state.do_search = true
-
         append(&state.search_term, input)
-        //search_linear()
-
-        /*fmt.println(state.frame_count - state.last_input_at)
-        if state.frame_count - state.last_input_at > 60 {
-            trigram_search()
-        }*/
     }
 
-    if state.frame_count - state.last_input_at > 30 && state.do_search {
-        fmt.println("=======> SEARCH <=========")
-        trigram_search()
-        //search_linear()
+    if state.do_search {
+        if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Q_Gram {
+            start := time.tick_now()
+            trigram_search(true)
+            elapsed := time.tick_since(start)
+            fmt.println("=====> v1 Elapsed: ", time.duration_seconds(elapsed))
+        }
+
+        if state.search_type == .Damerau_Levenshtein_With_Trigram {
+            start := time.tick_now()
+            trigram_search(false)
+            elapsed := time.tick_since(start)
+            fmt.println("=====> v2 Elapsed: ", time.duration_seconds(elapsed))
+        }
+
+        if state.search_type == .Linear {
+            start := time.tick_now()
+            search_linear()
+            elapsed := time.tick_since(start)
+            fmt.println("=====> v3 Elapsed: ", time.duration_seconds(elapsed))
+        }
         state.do_search = false
-        
     }
-
-
 }
 
 // Rune level "Damerau-Levenshtein distance"
@@ -169,7 +218,7 @@ similarity :: proc(s1: string, s2: string) -> f64 {
     return rune_level_distance
 }
 
-trigram_search :: proc() {
+trigram_search :: proc(use_q_gram: bool = true) {
     state := get_state()
 
     tmp_results_map : map[string]i32
@@ -192,28 +241,28 @@ trigram_search :: proc() {
 
     clear(&state.search_results_v2)
 
-    min_trigram_count := i32(f64(len(input_lower)) * 0.70)
-    fmt.println("=========> MIN: ", min_trigram_count)
+    if use_q_gram {
+        min_trigram_count := i32(f64(len(input_lower)) * 0.50)
+        fmt.println("=========> MIN: ", min_trigram_count)
 
-    tmp_count : map[i32]i32 // data_idx and its count
-    defer delete(tmp_count)
+        tmp_count : map[i32]i32 // data_idx and its count
+        defer delete(tmp_count)
 
-    for tri_g in input_trigram {
-        indices, found := state.trigram_index[tri_g]
-        if !found do continue
+        for tri_g in input_trigram {
+            indices, found := state.trigram_index[tri_g]
+            if !found do continue
 
-        for i in indices {
-            //_, exists := tmp_count[i]
-            tmp_count[i] += 1
+            for i in indices {
+                tmp_count[i] += 1
+            }
         }
-    }
 
-    for entry_idx, count in tmp_count {
-        if count < min_trigram_count do continue
+        for entry_idx, count in tmp_count {
+            if count < min_trigram_count do continue
 
-        foo := state.data[entry_idx]
-        foo_lower := strings.to_lower(string(foo), context.temp_allocator)
-        if len(input_lower) > len(foo_lower) do continue
+            foo := state.data[entry_idx]
+            foo_lower := strings.to_lower(string(foo), context.temp_allocator)
+            if len(input_lower) > len(foo_lower) do continue
 
             _, exists := tmp_results_map[foo_lower]
             if exists {
@@ -229,40 +278,37 @@ trigram_search :: proc() {
             }
 
             tmp_results_map[foo_lower] = entry_idx
-            //append(&state.search_results, foo)
-            append(&state.search_results_v2, row)
-
-
-    }
-
-    /*clear(&state.search_results_v2)
-    for substring in input_trigram {
-        entries, found := state.trigram_index[substring]
-        if !found do continue
-
-        for entry_idx in entries {
-            foo := state.data[entry_idx]
-            foo_lower := strings.to_lower(string(foo), context.temp_allocator)
-            if len(input_lower) > len(foo_lower) do continue
-
-            _, exists := tmp_results_map[foo_lower]
-            if exists {
-                continue
-            }
-
-            score := similarity(input_lower, foo_lower)
-            if score == 0 do continue
-
-            row := Row{
-                name = foo,
-                score = score
-            }
-
-            tmp_results_map[foo_lower] = entry_idx
-            //append(&state.search_results, foo)
             append(&state.search_results_v2, row)
         }
-    }*/
+    } else {
+        // no q-gram
+        for substring in input_trigram {
+            entries, found := state.trigram_index[substring]
+            if !found do continue
+
+            for entry_idx in entries {
+                foo := state.data[entry_idx]
+                foo_lower := strings.to_lower(string(foo), context.temp_allocator)
+                if len(input_lower) > len(foo_lower) do continue
+
+                _, exists := tmp_results_map[foo_lower]
+                if exists {
+                    continue
+                }
+
+                score := similarity(input_lower, foo_lower)
+                if score == 0 do continue
+
+                row := Row{
+                    name = foo,
+                    score = score
+                }
+
+                tmp_results_map[foo_lower] = entry_idx
+                append(&state.search_results_v2, row)
+            }
+        }
+    }
 
     sort.quick_sort_proc(state.search_results_v2[:], proc(a, b: Row) -> int {
         if a.score < b.score do return 1
@@ -277,12 +323,16 @@ search_linear :: proc() {
     input_lower := strings.to_lower(string(input_as_cstring), context.temp_allocator)
 
     state := get_state()
-    clear(&state.search_results)
+    clear(&state.search_results_v2)
 
     for it in state.data {
         lower_it := strings.to_lower(string(it), context.temp_allocator)
         if strings.contains(lower_it, input_lower) {
-            append(&state.search_results, it)
+            row := Row{
+                name = it,
+                score = 0
+            }
+            append(&state.search_results_v2, row)
         }
     }
 }
@@ -346,7 +396,7 @@ get_search_input :: proc() -> cstring {
 
 init_gui :: proc() -> ^Gui {
     gui := get_gui()
-    gui.input_rect = rl.Rectangle{ 10, 10, 500, 30 }
+    gui.input_rect = rl.Rectangle{ 10, 35, 500, 30 }
     return gui
 }
 
