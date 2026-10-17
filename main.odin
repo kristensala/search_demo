@@ -8,6 +8,8 @@ import "core:strings"
 import rl "vendor:raylib"
 
 Rect :: rl.Rectangle
+Q_GRAM_SIZE :: 3
+EDIT_DISTANCE_THRESHOLD :: 5
 
 Type :: enum {
     Damerau_Levenshtein_With_Trigram_And_Trigram_Filter,
@@ -94,15 +96,18 @@ main :: proc() {
             rl.DrawRectangleRec(gui.input_rect, rl.WHITE)
             rl.DrawText(get_search_input(), 15, 40, 20, TEXT_COLOR)
 
-            screen_height := rl.GetScreenHeight()
-            pos_y : i32 = 70
-            for row, i in state.search_results_v2 {
-                txt := fmt.ctprintf("%s: %f", row.name, row.score)
+            // Draw search results
+            {
+                screen_height := rl.GetScreenHeight()
+                pos_y : i32 = 70
+                for row, i in state.search_results_v2 {
+                    txt := fmt.ctprintf("%s: %f", row.name, row.score)
 
-                rl.DrawText(txt, 15, pos_y, 20, rl.WHITE)
-                pos_y += 20
+                    rl.DrawText(txt, 15, pos_y, 20, rl.WHITE)
+                    pos_y += 20
 
-                if pos_y >= screen_height do break
+                    if pos_y >= screen_height do break
+                }
             }
         }
 
@@ -158,14 +163,14 @@ update :: proc() {
     if state.do_search {
         if state.search_type == .Damerau_Levenshtein_With_Trigram_And_Trigram_Filter {
             start := time.tick_now()
-            trigram_search(true)
+            dl_search(true)
             elapsed := time.tick_since(start)
             fmt.println("=====> v1 Elapsed: ", time.duration_seconds(elapsed))
         }
 
         if state.search_type == .Damerau_Levenshtein_With_Trigram {
             start := time.tick_now()
-            trigram_search(false)
+            dl_search(false)
             elapsed := time.tick_since(start)
             fmt.println("=====> v2 Elapsed: ", time.duration_seconds(elapsed))
         }
@@ -180,45 +185,7 @@ update :: proc() {
     }
 }
 
-// Rune level "Damerau-Levenshtein distance"
-measure_string_distance :: proc(s1: string, s2: string) -> int {
-    rows := len(s1) + 1
-    cols := len(s2) + 1
-
-    dp := make([]int, rows*cols)
-    defer delete(dp)
-
-    for i := 0; i <= len(s1); i+=1 {
-        dp[i * cols] = i
-    }
-
-    for j := 0; j <= len(s2); j+=1 {
-        dp[j] = j
-    }
-
-    for i := 1; i <= len(s1); i+=1 {
-        for j := 1; j <= len(s2); j+=1 {
-            if s1[i-1] == s2[j-1] {
-                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)]
-            } else {
-                // dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
-                dp[i * cols + j] = 1 + min(dp[(i - 1) * cols + j], dp[i * cols + (j - 1)], dp[(i - 1) * cols + (j - 1)])
-            }
-        }
-    }
-
-    distance := dp[(rows - 1) * cols + (cols - 1)]
-    return distance
-}
-
-similarity :: proc(s1: string, s2: string) -> f64 {
-    x := max(len(s1), len(s2))
-    if x == 0 do return 1.0
-    rune_level_distance := 1.0 - f64(measure_string_distance(s1, s2)) / f64(x)
-    return rune_level_distance
-}
-
-trigram_search :: proc(filter_trigram: bool = true) {
+dl_search :: proc(filter_trigram: bool = true) {
     state := get_state()
 
     tmp_results_map : map[string]i32
@@ -241,11 +208,18 @@ trigram_search :: proc(filter_trigram: bool = true) {
 
     clear(&state.search_results_v2)
 
-    // @todo: read about Ukkonen/Gravano q-gram count filter
-    if filter_trigram {
-        min_trigram_count := i32(f64(len(input_lower)) * 0.50)
-        fmt.println("=========> MIN: ", min_trigram_count)
+    /*q_gram_distance_search(input_lower, input_trigram)
+    if true do return*/
 
+    // @todo: read about Ukkonen/Gravano q-gram count filter
+    // https://scispace.com/pdf/a-comparison-of-approximate-string-matching-algorithms-1gmqex4nwx.pdf
+
+    // The Count Filtering Rule (Lemma)
+    // min shared q-grams = max(|s|, |t|) - q + 1 - q * k
+    // s and t are word lengths
+    // q = the size of the q-gram
+    // what is k? (max allowed edit distance)
+    if filter_trigram {
         tmp_count : map[i32]i32 // data_idx and its count
         defer delete(tmp_count)
 
@@ -259,26 +233,28 @@ trigram_search :: proc(filter_trigram: bool = true) {
         }
 
         for entry_idx, count in tmp_count {
-            if count < min_trigram_count do continue
+            entry := state.data[entry_idx]
+            min_trigram_count := (max(len(input_lower), len(entry)) + Q_GRAM_SIZE - 1) - Q_GRAM_SIZE*EDIT_DISTANCE_THRESHOLD
 
-            foo := state.data[entry_idx]
-            foo_lower := strings.to_lower(string(foo), context.temp_allocator)
-            if len(input_lower) > len(foo_lower) do continue
+            if count < i32(min_trigram_count) do continue
 
-            _, exists := tmp_results_map[foo_lower]
+            entry_lower := strings.to_lower(string(entry), context.temp_allocator)
+            if len(input_lower) > len(entry_lower) do continue
+
+            _, exists := tmp_results_map[entry_lower]
             if exists {
                 continue
             }
 
-            score := similarity(input_lower, foo_lower)
+            score := similarity(input_lower, entry_lower)
             if score < 0.1 do continue
 
             row := Row{
-                name = foo,
+                name = entry,
                 score = score
             }
 
-            tmp_results_map[foo_lower] = entry_idx
+            tmp_results_map[entry_lower] = entry_idx
             append(&state.search_results_v2, row)
         }
     } else {
@@ -387,7 +363,6 @@ trigram_from_string :: proc(input: string, input_idx: i32) {
         }
     }
 }
-
 
 get_search_input :: proc() -> cstring {
     state := get_state()
